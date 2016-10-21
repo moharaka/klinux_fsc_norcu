@@ -127,11 +127,20 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	static const struct file_operations empty_fops;
 	struct address_space *const mapping = &inode->i_data;
 
+
 	inode->i_sb = sb;
 	inode->i_blkbits = sb->s_blocksize_bits;
-	inode->i_flags = 0;
-	atomic_set(&inode->i_count, 1);
+#ifdef CONFIG_ICACHE_NO_RCU
+	spin_lock(&inode->i_lock);
+#else
+	spin_lock_init(&inode->i_lock);
+#endif
 	inode->i_op = &empty_iops;
+	inode->i_flags = 0;
+#ifdef CONFIG_ICACHE_NO_RCU
+	spin_unlock(&inode->i_lock);
+#endif
+	atomic_set(&inode->i_count, 1);
 	inode->i_fop = &empty_fops;
 	inode->__i_nlink = 1;
 	inode->i_opflags = 0;
@@ -153,7 +162,6 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 
 	if (security_inode_alloc(inode))
 		goto out;
-	spin_lock_init(&inode->i_lock);
 	lockdep_set_class(&inode->i_lock, &sb->s_type->i_lock_key);
 
 	mutex_init(&inode->i_mutex);
@@ -248,20 +256,27 @@ void __destroy_inode(struct inode *inode)
 }
 EXPORT_SYMBOL(__destroy_inode);
 
+#ifndef CONFIG_ICACHE_NO_RCU
 static void i_callback(struct rcu_head *head)
 {
 	struct inode *inode = container_of(head, struct inode, i_rcu);
 	kmem_cache_free(inode_cachep, inode);
 }
+#endif
 
 static void destroy_inode(struct inode *inode)
 {
 	BUG_ON(!list_empty(&inode->i_lru));
 	__destroy_inode(inode);
+
 	if (inode->i_sb->s_op->destroy_inode)
 		inode->i_sb->s_op->destroy_inode(inode);
 	else
+#ifdef CONFIG_ICACHE_NO_RCU
+		kmem_cache_free(inode_cachep, inode);
+#else
 		call_rcu(&inode->i_rcu, i_callback);
+#endif
 }
 
 /**
@@ -1773,7 +1788,7 @@ void __init inode_init(void)
 					 sizeof(struct inode),
 					 0,
 					 (SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|
-					 SLAB_MEM_SPREAD),
+					 SLAB_DESTROY_BY_RCU|SLAB_MEM_SPREAD),
 					 init_once);
 
 	/* Hash may have been set up in inode_init_early */

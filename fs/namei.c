@@ -362,7 +362,11 @@ static inline int do_inode_permission(struct inode *inode, int mask)
 
 		/* This gets set once for the inode lifetime */
 		spin_lock(&inode->i_lock);
-		inode->i_opflags |= IOP_FASTPERM;
+#ifdef CONFIG_ICACHE_NO_RCU
+		/* Recheck after lock taken */
+		if (likely(!inode->i_op->permission))
+#endif
+			inode->i_opflags |= IOP_FASTPERM;
 		spin_unlock(&inode->i_lock);
 	}
 	return generic_permission(inode, mask);
@@ -1361,6 +1365,7 @@ static int lookup_fast(struct nameidata *nd,
 		 * the dentry name information from lookup.
 		 */
 		*inode = dentry->d_inode;
+		/*FIXME : igc = (*inode)->gc; */
 		if (read_seqcount_retry(&dentry->d_seq, seq))
 			return -ECHILD;
 
@@ -1374,6 +1379,7 @@ static int lookup_fast(struct nameidata *nd,
 		if (__read_seqcount_retry(&parent->d_seq, nd->seq))
 			return -ECHILD;
 		nd->seq = seq;
+		/*FIXME : nd->inode_gc = igc; */
 
 		if (unlikely(dentry->d_flags & DCACHE_OP_REVALIDATE)) {
 			status = d_revalidate(dentry, nd->flags);
@@ -1505,7 +1511,11 @@ static inline int should_follow_link(struct inode *inode, int follow)
 
 		/* This gets set once for the inode lifetime */
 		spin_lock(&inode->i_lock);
-		inode->i_opflags |= IOP_NOFOLLOW;
+#ifdef CONFIG_ICACHE_NO_RCU
+		/* Recheck after lock taken */
+		if (likely(!inode->i_op->follow_link))
+#endif
+			inode->i_opflags |= IOP_NOFOLLOW;
 		spin_unlock(&inode->i_lock);
 	}
 	return 0;
@@ -1611,7 +1621,11 @@ static inline int can_lookup(struct inode *inode)
 
 	/* We do this once for the lifetime of the inode */
 	spin_lock(&inode->i_lock);
-	inode->i_opflags |= IOP_LOOKUP;
+#ifdef CONFIG_ICACHE_NO_RCU
+	/* Recheck after lock taken */
+	if (likely(inode->i_op->lookup))
+#endif
+		inode->i_opflags |= IOP_LOOKUP;
 	spin_unlock(&inode->i_lock);
 	return 1;
 }
@@ -1796,8 +1810,18 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 		nd->last = this;
 		nd->last_type = type;
 
-		if (!name[len])
-			return 0;
+		if (!name[len]) {
+#ifdef CONFIG_ICACHE_NO_RCU
+			/* FIXME : add the inode check here!!? */
+			/* does we need a read barrier... most likely... */
+			if (unlikely(read_seqcount_retry(
+					&nd->path.dentry->d_seq, nd->seq) &&
+				(nd->path.dentry->d_inode != nd->inode)))
+				return -ECHILD;
+			else
+#endif
+				return 0;
+		}
 		/*
 		 * If it wasn't NUL, we know it was '/'. Skip that
 		 * slash, and continue until no more slashes.
@@ -1974,6 +1998,8 @@ static int path_lookupat(int dfd, const char *name,
 	if (!err)
 		err = complete_walk(nd);
 
+	/* Here we should have a refcount on the dentry du to complete_walk op.
+	 * which implicitly imply a refcount on the inode (?) */
 	if (!err && nd->flags & LOOKUP_DIRECTORY) {
 		if (!can_lookup(nd->inode)) {
 			path_put(&nd->path);

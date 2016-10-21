@@ -233,12 +233,15 @@ static void d_free(struct dentry *dentry)
 	this_cpu_dec(nr_dentry);
 	if (dentry->d_op && dentry->d_op->d_release)
 		dentry->d_op->d_release(dentry);
-
+#ifdef CONFIG_DCACHE_NO_RCU
 	/* if dentry was never visible to RCU, immediate free is OK */
 	if (!(dentry->d_flags & DCACHE_RCUACCESS))
 		__d_free(&dentry->d_u.d_rcu);
 	else
 		call_rcu(&dentry->d_u.d_rcu, __d_free);
+#else
+	__d_free(&dentry->d_u.d_rcu);
+#endif
 }
 
 /**
@@ -1243,6 +1246,12 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	if (!dentry)
 		return NULL;
 
+#ifdef CONFIG_DCACHE_NO_RCU
+	/* Make sure that any current lookup
+	 * will be aware of this dentry's changes */
+	write_seqcount_barrier(&dentry->d_seq);
+#endif
+
 	/*
 	 * We guarantee that the inline name is always NUL-terminated.
 	 * This way the memcpy() done by the name switching in rename
@@ -1272,7 +1281,9 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	dentry->d_count = 1;
 	dentry->d_flags = 0;
 	spin_lock_init(&dentry->d_lock);
+#ifdef CONFIG_DCACHE_NO_RCU
 	seqcount_init(&dentry->d_seq);
+#endif
 	dentry->d_inode = NULL;
 	dentry->d_parent = dentry;
 	dentry->d_sb = sb;
@@ -3029,6 +3040,9 @@ static void __init dcache_init(void)
 	 * of the dcache. 
 	 */
 	dentry_cache = KMEM_CACHE(dentry,
+#ifdef CONFIG_DCACHE_NO_RCU
+		SLAB_DESTROY_BY_RCU|
+#endif
 		SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|SLAB_MEM_SPREAD);
 
 	/* Hash may have been set up in dcache_init_early */
